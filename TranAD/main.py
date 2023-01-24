@@ -15,6 +15,13 @@ from time import time
 from pprint import pprint
 # from beepy import beep
 
+""" def convert_to_windows(data, model):
+	windows = []; w_size = model.n_window
+	for i, g in enumerate(data.dataset): 
+		if i >= w_size: w = g[i-w_size:i]
+		else: w = torch.cat([g[0].repeat(w_size-i, 1), g[0:i]])
+		windows.append(w if 'TranAD' in args.model or 'Attention' in args.model else w.view(-1))
+	return torch.stack(windows) """
 def convert_to_windows(data, model):
 	windows = []; w_size = model.n_window
 	for i, g in enumerate(data): 
@@ -23,19 +30,28 @@ def convert_to_windows(data, model):
 		windows.append(w if 'TranAD' in args.model or 'Attention' in args.model else w.view(-1))
 	return torch.stack(windows)
 
+def create_dataloader(df, batch_size: int=1, shuffle: bool=False, drop_last=False):
+    for i, (cycle, cycle_grp) in enumerate(df.groupby('cycle_id')):
+        cycle_tmp = cycle_grp.drop(columns=['cycle_id'])
+        cycle_tmp = np.expand_dims(cycle_tmp, axis=0)
+        if i == 0: dataset = cycle_tmp
+        else: dataset = np.vstack((dataset, cycle_tmp))
+    n_seq, seq_len, n_features = dataset.shape
+    dataset = torch.FloatTensor(dataset)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, drop_last=drop_last)
+    return dataloader, seq_len, n_features
+
 def load_dataset(dataset):
 	folder = os.path.join(output_folder, dataset)
 	if not os.path.exists(folder):
 		raise Exception('Processed Data not found.')
 	loader = []
-	for file in ['train', 'test']:
-		if dataset == 'NAB': file = 'ec2_request_latency_system_failure_' + file
-		if dataset == 'SMD': file = 'machine-1-1_' + file
-		loader.append(np.load(os.path.join(folder, f'{file}.npy')))
+	train = np.load(os.path.join(folder, 'train.npy'))
+	test = np.load(os.path.join(folder, 'test.npy'))
 	# loader = [i[:, debug:debug+1] for i in loader]
 	if args.less: loader[0] = cut_array(0.2, loader[0])
-	train_loader = DataLoader(loader[0], batch_size=loader[0].shape[0])
-	test_loader = DataLoader(loader[1], batch_size=loader[1].shape[0])
+	train_loader = DataLoader(train,  batch_size=train.shape[0], shuffle=True, drop_last=True)
+	test_loader = DataLoader(test,batch_size=train.shape[0])
 	return train_loader, test_loader
 
 def save_model(model, optimizer, scheduler, epoch, accuracy_list):
@@ -56,7 +72,7 @@ def load_model(modelname, dims):
 	optimizer = torch.optim.AdamW(model.parameters() , lr=model.lr, weight_decay=1e-5)
 	scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 5, 0.9)
 	fname = f'checkpoints/{args.model}_{args.dataset}/model.ckpt'
-	if os.path.exists(fname) and (not args.retrain or args.test):
+	if os.path.exists(fname):
 		print(f"{color.GREEN}Loading pre-trained model: {model.name}{color.ENDC}")
 		checkpoint = torch.load(fname)
 		model.load_state_dict(checkpoint['model_state_dict'])
@@ -289,28 +305,29 @@ def backprop(epoch, model, data, dataO, optimizer, scheduler, training = True):
 			return loss.detach().numpy(), y_pred.detach().numpy()
 
 if __name__ == '__main__':
-	train_loader, test_loader, = load_dataset(args.dataset)
+	train_dataloader, test_dataloader, = load_dataset(args.dataset)
 	if args.model in ['MERLIN']:
 		eval(f'run_{args.model.lower()}(test_loader,args.dataset)')
-	
+	train_dataloader = next(iter(train_dataloader))
+	test_dataloader = next(iter(test_dataloader))
+	for (i, train_loader),(j,test_loader) in zip(enumerate(train_dataloader),enumerate(test_dataloader)): 
+		## Prepare data
+		trainD, testD = train_loader, test_loader
+		trainO, testO = trainD, testD
+		model, optimizer, scheduler, epoch, accuracy_list = load_model(args.model, testD.shape[1]) 
+		if model.name in ['Attention', 'DAGMM', 'USAD', 'MSCRED', 'CAE_M', 'GDN', 'MTAD_GAT', 'MAD_GAN'] or 'TranAD' in model.name: 
+			trainD, testD = convert_to_windows(trainD, model), convert_to_windows(testD, model)
 
-	## Prepare data
-	trainD, testD = next(iter(train_loader)), next(iter(test_loader))
-	trainO, testO = trainD, testD
-	model, optimizer, scheduler, epoch, accuracy_list = load_model(args.model, testD.shape[1]) 
-	if model.name in ['Attention', 'DAGMM', 'USAD', 'MSCRED', 'CAE_M', 'GDN', 'MTAD_GAT', 'MAD_GAN'] or 'TranAD' in model.name: 
-		trainD, testD = convert_to_windows(trainD, model), convert_to_windows(testD, model)
-
-	### Training phase
-	if not args.test:
-		print(f'{color.HEADER}Training {args.model} on {args.dataset}{color.ENDC}')
-		num_epochs = 100; e = epoch + 1; start = time()
-		for e in tqdm(list(range(epoch+1, epoch+num_epochs+1))):
-			lossT, lr = backprop(e, model, trainD, trainO, optimizer, scheduler)
-			accuracy_list.append((lossT, lr))
-		print(color.BOLD+'Training time: '+"{:10.4f}".format(time()-start)+' s'+color.ENDC)
-		save_model(model, optimizer, scheduler, e, accuracy_list)
-		plot_accuracies(accuracy_list, f'{args.model}_{args.dataset}')
+		### Training phase
+		if not args.test:
+			print(f'{color.HEADER}Training {args.model} on {args.dataset}{color.ENDC}')
+			num_epochs = 50; e = epoch + 1; start = time()
+			for e in tqdm(list(range(epoch+1, epoch+num_epochs+1))):
+				lossT, lr = backprop(e, model, trainD, trainO, optimizer, scheduler)
+				accuracy_list.append((lossT, lr))
+			print(color.BOLD+'Training time: '+"{:10.4f}".format(time()-start)+' s'+color.ENDC)
+			save_model(model, optimizer, scheduler, e, accuracy_list)
+			plot_accuracies(accuracy_list, f'{args.model}_{args.dataset}')
 
 	### Testing phase
 	torch.zero_grad = True

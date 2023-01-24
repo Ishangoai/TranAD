@@ -40,7 +40,7 @@ def normalize2(a, min_a = None, max_a = None):
 
 def normalize3(a, min_a = None, max_a = None):
 	if min_a is None: min_a, max_a = np.min(a, axis = 0), np.max(a, axis = 0)
-	return (a - min_a) / (max_a - min_a + 0.0001), min_a, max_a
+	return (a - min_a) / (max_a - min_a + 0.0001)
 
 def convertNumpy(df):
 	x = df[df.columns[3:]].values[::10, :]
@@ -55,14 +55,14 @@ def load_data(dataset):
 		for filename in file_list:
 			if not filename.endswith('.csv'): continue
 			df = pd.read_csv(dataset_folder+'/'+filename)
-			vals = df.values[:,1]
-			min_temp, max_temp = np.min(vals), np.max(vals)
-			vals = (vals - min_temp) / (max_temp - min_temp)
-			train = vals.astype(float)
-			train = train.reshape(-1, 1)
+			for i,(cycle, cycle_grp) in enumerate(df.groupby('cycle_id')):
+				cycle_tmp = cycle_grp.drop(columns=['cycle_id'])
+				cycle_tmp = np.expand_dims(cycle_tmp, axis=0)
+				if i == 0: dataset = normalize3(cycle_tmp)
+				else: dataset = np.vstack((normalize3(dataset), normalize3(cycle_tmp)))
 			fn = filename.replace('.csv', '')
-			for file in ['train']:
-				np.save(os.path.join(folder, f'{fn}_{file}.npy'), eval(file))
+			for file in ['train','test']:
+				np.save(os.path.join(folder, f'{fn}.npy'), dataset)
 	elif dataset == 'SMD':
 		dataset_folder = 'data/SMD'
 		file_list = os.listdir(os.path.join(dataset_folder, "train"))
